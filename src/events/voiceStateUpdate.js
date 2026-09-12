@@ -1,4 +1,5 @@
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } from '@discordjs/voice';
 import {
     getJoinToCreateConfig, 
     registerTemporaryChannel, 
@@ -9,6 +10,11 @@ import {
 import { sanitizeInput } from '../utils/validation.js';
 import { logger } from '../utils/logger.js';
 import { handleMusicVoiceState } from '../services/music/musicVoiceState.js';
+
+// --- BEÁLLÍTÁSOK (Töltsd ki a saját ID-jaiddal) ---
+const VERIFICATION_CHANNEL_ID = '1548329936417333249';
+const VERIFIED_ROLE_ID = '1548319564163584006';
+const AUDIO_FILE_PATH = './assets/verification.mp3';
 
 const channelCreationCooldown = new Map();
 const VOICE_CREATE_COOLDOWN_MS = 2000;
@@ -29,27 +35,69 @@ export default {
         const cooldownKey = `${guildId}-${userId}`;
         cleanupCooldownEntries();
 
+        // === 1. VOICE VERIFICATION RENDSZER ===
+        if (!oldState.channel && newState.channel && newState.channel.id === VERIFICATION_CHANNEL_ID) {
+            handleVoiceVerification(newState);
+        }
+
+        // === 2. MEGLÉVŐ JOIN-TO-CREATE ÉS DISCORD LOGIKA ===
         try {
             const config = await getJoinToCreateConfig(client, guildId);
 
-            if (!config.enabled || config.triggerChannels.length === 0) {
-                return;
-            }
+            if (config && config.enabled && config.triggerChannels && config.triggerChannels.length > 0) {
+                if (!oldState.channel && newState.channel) {
+                    await handleVoiceJoin(client, newState, config);
+                }
 
-            if (!oldState.channel && newState.channel) {
-                await handleVoiceJoin(client, newState, config);
-            }
+                if (oldState.channel && !newState.channel) {
+                    await handleVoiceLeave(client, oldState, config);
+                }
 
-            if (oldState.channel && !newState.channel) {
-                await handleVoiceLeave(client, oldState, config);
-            }
-
-            if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
-                await handleVoiceMove(client, oldState, newState, config);
+                if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+                    await handleVoiceMove(client, oldState, newState, config);
+                }
             }
 
         } catch (error) {
             logger.error(`Error in voiceStateUpdate for guild ${guildId}:`, error);
+        }
+
+        // Voice verification kezelő függvény
+        async function handleVoiceVerification(state) {
+            try {
+                const connection = joinVoiceChannel({
+                    channelId: state.channel.id,
+                    guildId: state.guild.id,
+                    adapterCreator: state.guild.voiceAdapterCreator,
+                });
+
+                const player = createAudioPlayer();
+                const resource = createAudioResource(AUDIO_FILE_PATH);
+
+                player.play(resource);
+                connection.subscribe(player);
+
+                player.on(AudioPlayerStatus.Idle, async () => {
+                    try {
+                        const role = state.guild.roles.cache.get(VERIFIED_ROLE_ID);
+                        if (role) {
+                            await state.member.roles.add(role);
+                            logger.info(`Verified Member role successfully added to ${state.member.user.tag}`);
+                        } else {
+                            logger.warn(`Verification role (${VERIFIED_ROLE_ID}) not found in guild ${state.guild.id}`);
+                        }
+                    } catch (roleErr) {
+                        logger.error(`Failed to assign verified role to ${state.member.user.tag}:`, roleErr);
+                    }
+                });
+
+                player.on('error', (err) => {
+                    logger.error('Audio player error during verification:', err);
+                });
+
+            } catch (err) {
+                logger.error(`Voice verification failed for user ${state.member.id}:`, err);
+            }
         }
 
         async function handleVoiceJoin(client, state, config) {
@@ -62,7 +110,7 @@ export default {
             const now = Date.now();
             if (channelCreationCooldown.has(cooldownKey)) {
                 const lastCreation = channelCreationCooldown.get(cooldownKey);
-if (now - lastCreation < VOICE_CREATE_COOLDOWN_MS) {
+                if (now - lastCreation < VOICE_CREATE_COOLDOWN_MS) {
                     logger.warn(`User ${member.id} is on cooldown for channel creation`);
                     return;
                 }
@@ -198,9 +246,9 @@ if (now - lastCreation < VOICE_CREATE_COOLDOWN_MS) {
 
                 const tempChannel = await guild.channels.create({
                     name: channelName,
-type: ChannelType.GuildVoice,
+                    type: ChannelType.GuildVoice,
                     parent: triggerChannel.parentId,
-userLimit: userLimit === 0 ? undefined : userLimit,
+                    userLimit: userLimit === 0 ? undefined : userLimit,
                     bitrate: bitrate,
                     permissionOverwrites: [
                         {
