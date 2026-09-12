@@ -1,5 +1,5 @@
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection } from '@discordjs/voice';
 import {
     getJoinToCreateConfig, 
     registerTemporaryChannel, 
@@ -11,10 +11,10 @@ import { sanitizeInput } from '../utils/validation.js';
 import { logger } from '../utils/logger.js';
 import { handleMusicVoiceState } from '../services/music/musicVoiceState.js';
 
-// --- BEÁLLÍTÁSOK (Töltsd ki a saját ID-jaiddal) ---
+// --- BEÁLLÍTÁSOK ---
 const VERIFICATION_CHANNEL_ID = '1548329936417333249';
 const VERIFIED_ROLE_ID = '1548319564163584006';
-const AUDIO_FILE_PATH = './assets/verification.mp3';
+const AUDIO_FILE_PATH = './verification.mp3';
 
 const channelCreationCooldown = new Map();
 const VOICE_CREATE_COOLDOWN_MS = 2000;
@@ -36,11 +36,29 @@ export default {
         cleanupCooldownEntries();
 
         // === 1. VOICE VERIFICATION RENDSZER ===
-        if (!oldState.channel && newState.channel && newState.channel.id === VERIFICATION_CHANNEL_ID) {
-            handleVoiceVerification(newState);
+        
+        // Biztosítjuk, hogy a bot folyamatosan bent legyen a verifikációs csatornában
+        let connection = getVoiceConnection(newState.guild.id);
+        const verifyChannel = newState.guild.channels.cache.get(VERIFICATION_CHANNEL_ID);
+
+        if (verifyChannel && !connection) {
+            try {
+                connection = joinVoiceChannel({
+                    channelId: VERIFICATION_CHANNEL_ID,
+                    guildId: newState.guild.id,
+                    adapterCreator: newState.guild.voiceAdapterCreator,
+                });
+            } catch (err) {
+                logger.error('Hiba a verifikációs csatornához való csatlakozáskor:', err);
+            }
         }
 
-        // === 2. MEGLÉVŐ JOIN-TO-CREATE ÉS DISCORD LOGIKA ===
+        // Ha egy felhasználó BELÉP a verifikációs csatornába
+        if (newState.channel && newState.channel.id === VERIFICATION_CHANNEL_ID && oldState.channel?.id !== VERIFICATION_CHANNEL_ID) {
+            handleVoiceVerification(newState, connection);
+        }
+
+        // === 2. JOIN-TO-CREATE ÉS DISCORD LOGIKA ===
         try {
             const config = await getJoinToCreateConfig(client, guildId);
 
@@ -63,22 +81,26 @@ export default {
         }
 
         // Voice verification kezelő függvény
-        async function handleVoiceVerification(state) {
+        async function handleVoiceVerification(state, currentConnection) {
             try {
-                const connection = joinVoiceChannel({
-                    channelId: state.channel.id,
-                    guildId: state.guild.id,
-                    adapterCreator: state.guild.voiceAdapterCreator,
-                });
+                if (!currentConnection) {
+                    currentConnection = joinVoiceChannel({
+                        channelId: state.channel.id,
+                        guildId: state.guild.id,
+                        adapterCreator: state.guild.voiceAdapterCreator,
+                    });
+                }
 
                 const player = createAudioPlayer();
                 const resource = createAudioResource(AUDIO_FILE_PATH);
 
                 player.play(resource);
-                connection.subscribe(player);
+                currentConnection.subscribe(player);
 
+                // Amikor a bot befejezi a beszédet
                 player.on(AudioPlayerStatus.Idle, async () => {
                     try {
+                        // 1. Rang hozzáadása
                         const role = state.guild.roles.cache.get(VERIFIED_ROLE_ID);
                         if (role) {
                             await state.member.roles.add(role);
@@ -86,8 +108,14 @@ export default {
                         } else {
                             logger.warn(`Verification role (${VERIFIED_ROLE_ID}) not found in guild ${state.guild.id}`);
                         }
-                    } catch (roleErr) {
-                        logger.error(`Failed to assign verified role to ${state.member.user.tag}:`, roleErr);
+
+                        // 2. Felhasználó lecsatlakoztatása (Disconnect) a Voice csatornából
+                        if (state.member.voice.channel) {
+                            await state.member.voice.disconnect();
+                            logger.info(`User ${state.member.user.tag} disconnected from voice after verification.`);
+                        }
+                    } catch (err) {
+                        logger.error(`Failed during post-verification actions for ${state.member.user.tag}:`, err);
                     }
                 });
 
