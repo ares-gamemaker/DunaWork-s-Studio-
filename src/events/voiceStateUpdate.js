@@ -1,22 +1,23 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
-const path = require('path');
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } from '@discordjs/voice';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const VERIFICATION_CHANNEL_ID = '1548329936417333249';
 const VERIFIED_ROLE_ID = '1548319564163584006';
 
-module.exports = async (client, oldState, newState) => {
-    // 1. Érzékeli egyáltalán a bot a mozgást?
+export default async function voiceStateUpdate(client, oldState, newState) {
     if (!oldState.channelId && newState.channelId) {
         console.log(`[TEST] Valaki belépett egy hangcsatornába! Csatorna ID: ${newState.channelId}`);
     }
 
-    // Ha nem a megadott verifikációs csatornába lépett be, kilépünk
     if (newState.channelId !== VERIFICATION_CHANNEL_ID) return;
 
     const member = newState.member;
     if (member.user.bot) return;
 
-    // Ha már megvan a rangja, ne fusson le
     if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
         console.log(`[TEST] ${member.user.tag} már ellenőrizve van.`);
         return;
@@ -33,7 +34,7 @@ module.exports = async (client, oldState, newState) => {
         });
 
         const player = createAudioPlayer();
-        const resourcePath = path.join(__dirname, '../../verification.mp3'); // ellenőrizd az mp3 útvonalát!
+        const resourcePath = path.join(__dirname, '../../verification.mp3');
         const resource = createAudioResource(resourcePath);
 
         player.play(resource);
@@ -56,4 +57,4 @@ module.exports = async (client, oldState, newState) => {
     } catch (error) {
         console.error(`[HIBA] Csatlakozási hiba:`, error);
     }
-};
+}
